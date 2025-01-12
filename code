@@ -1,0 +1,197 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import random
+import streamlit as st
+import time
+
+# Initialize MediaPipe Hands and Drawing utils
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.7)
+
+# Gesture labels
+gesture_labels = ['rock', 'paper', 'scissors']
+gesture_to_index = {gesture: idx for idx, gesture in enumerate(gesture_labels)}
+
+# Initialize session state variables
+if 'player_score' not in st.session_state:
+    st.session_state.player_score = 0
+if 'bot_score' not in st.session_state:
+    st.session_state.bot_score = 0
+if 'round_count' not in st.session_state:
+    st.session_state.round_count = 0
+if 'game_active' not in st.session_state:
+    st.session_state.game_active = False
+if 'countdown_active' not in st.session_state:
+    st.session_state.countdown_active = False
+if 'countdown_start' not in st.session_state:
+    st.session_state.countdown_start = 0
+if 'last_round_time' not in st.session_state:
+    st.session_state.last_round_time = 0
+if 'last_player_gesture' not in st.session_state:
+    st.session_state.last_player_gesture = None
+if 'transition_matrix' not in st.session_state:
+    st.session_state.transition_matrix = np.ones((3, 3))
+if 'player_move_counts' not in st.session_state:
+    st.session_state.player_move_counts = {"rock": 0, "paper": 0, "scissors": 0}
+if 'current_result' not in st.session_state:
+    st.session_state.current_result = ""
+if 'current_bot_move' not in st.session_state:
+    st.session_state.current_bot_move = "N/A"
+
+# Function to detect gesture based on landmarks
+def is_finger_folded(tip_index, dip_index, hand_landmarks):
+    return hand_landmarks.landmark[tip_index].y > hand_landmarks.landmark[dip_index].y
+
+def detect_gesture(hand_landmarks):
+    thumb_folded = is_finger_folded(4, 3, hand_landmarks)
+    index_folded = is_finger_folded(8, 6, hand_landmarks)
+    middle_folded = is_finger_folded(12, 10, hand_landmarks)
+    ring_folded = is_finger_folded(16, 14, hand_landmarks)
+    pinky_folded = is_finger_folded(20, 18, hand_landmarks)
+
+    if not thumb_folded and index_folded and middle_folded and ring_folded and pinky_folded:
+        return "rock"
+    elif not index_folded and not middle_folded and ring_folded and pinky_folded:
+        return "scissors"
+    elif not index_folded and not middle_folded and not ring_folded and not pinky_folded:
+        return "paper"
+    return "Unknown"
+
+# Update transition matrix based on player's move history
+def update_transition_matrix(prev_move, current_move):
+    if prev_move is not None:
+        st.session_state.transition_matrix[gesture_to_index[prev_move], gesture_to_index[current_move]] += 1
+
+# Predict player's next move based on transition matrix
+def predict_next_move():
+    if st.session_state.round_count < 5:
+        return random.choice(gesture_labels)
+    if st.session_state.last_player_gesture is None:
+        return random.choice(gesture_labels)
+    last_index = gesture_to_index[st.session_state.last_player_gesture]
+    probabilities = st.session_state.transition_matrix[last_index] / np.sum(st.session_state.transition_matrix[last_index])
+    predicted_index = np.argmax(probabilities)
+    return gesture_labels[predicted_index]
+
+# Choose the bot's move to counter the predicted player move
+def choose_bot_move():
+    if st.session_state.round_count < 5:
+        return random.choice(gesture_labels)
+    predicted_move = predict_next_move()
+    if predicted_move == 'rock':
+        return 'paper'
+    elif predicted_move == 'paper':
+        return 'scissors'
+    elif predicted_move == 'scissors':
+        return 'rock'
+
+# Streamlit UI
+st.title("Rock-Paper-Scissors Game with Strategic Bot")
+
+# Score display
+col1, col2 = st.columns(2)
+with col1:
+    player_score_text = st.empty()
+    player_score_text.text(f"Player Score: {st.session_state.player_score}")
+with col2:
+    bot_score_text = st.empty()
+    bot_score_text.text(f"Bot Score: {st.session_state.bot_score}")
+
+# Round counter
+round_text = st.empty()
+round_text.text(f"Round: {st.session_state.round_count}")
+
+# Start button
+if st.button('Start Game') or st.session_state.game_active:
+    st.session_state.game_active = True
+    st.session_state.countdown_active = True
+
+# Status display
+status_text = st.empty()
+frame_placeholder = st.empty()
+
+# Main game loop
+cap = cv2.VideoCapture(0)
+
+while cap.isOpened() and st.session_state.game_active:
+    success, frame = cap.read()
+    if not success:
+        st.warning("Ignoring empty camera frame.")
+        continue
+
+    frame = cv2.flip(frame, 1)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+
+    # Handle countdown
+    if st.session_state.countdown_active:
+        elapsed = time.time() - st.session_state.countdown_start
+        remaining = 3 - elapsed
+        
+        if remaining > 0:
+            status_text.text(f"Get Ready! {int(remaining)}")
+            cv2.putText(frame, f"{int(remaining)}", (frame.shape[1]//2 - 50, frame.shape[0]//2), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 6, (255, 255, 255), 4)
+        else:
+            st.session_state.countdown_active = False
+            st.session_state.last_round_time = time.time()
+            status_text.text("Make your move!")
+
+     # Process hand gestures
+    if not st.session_state.countdown_active and st.session_state.game_active:
+        time_since_round = time.time() - st.session_state.last_round_time
+        
+        if time_since_round < 2:
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    player_gesture = detect_gesture(hand_landmarks)
+                    
+                    if player_gesture != "Unknown":
+                        bot_move = choose_bot_move()
+                        
+                        # Determine winner
+                        if bot_move == player_gesture:
+                            st.session_state.current_result = "Draw"
+                        elif (bot_move == "rock" and player_gesture == "scissors") or \
+                             (bot_move == "paper" and player_gesture == "rock") or \
+                             (bot_move == "scissors" and player_gesture == "paper"):
+                            st.session_state.bot_score += 1
+                            st.session_state.current_result = "Bot Wins"
+                        else:
+                            st.session_state.player_score += 1
+                            st.session_state.current_result = "Player Wins"
+                        
+                        st.session_state.round_count += 1
+                        st.session_state.current_bot_move = bot_move
+                        update_transition_matrix(st.session_state.last_player_gesture, player_gesture)
+                        st.session_state.last_player_gesture = player_gesture
+                        st.session_state.player_move_counts[player_gesture] += 1
+                        st.session_state.countdown_active = True  # Start countdown for next round
+                        st.session_state.countdown_start = time.time()
+
+        elif time_since_round >= 2:
+            status_text.text("Time's up! Starting new round...")
+            st.session_state.countdown_active = True
+            st.session_state.countdown_start = time.time()
+
+    # Display game information on frame
+    cv2.putText(frame, f"Player: {st.session_state.last_player_gesture}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(frame, f"Bot: {st.session_state.current_bot_move}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(frame, f"Result: {st.session_state.current_result}", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    # Update Streamlit elements
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frame_placeholder.image(frame_rgb)
+    player_score_text.text(f"Player Score: {st.session_state.player_score}")
+    bot_score_text.text(f"Bot Score: {st.session_state.bot_score}")
+    round_text.text(f"Round: {st.session_state.round_count}")
+
+    # Check for 'q' key to quit
+    if cv2.waitKey(5) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
